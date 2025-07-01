@@ -85,45 +85,62 @@ app.get("/api/hubspot/webhook", async (req, res) => {
 app.post("/api/hubspot/webhook", async (req, res) => {
   const portalId = req.headers["x-hubspot-hub-id"];
   const signature = req.headers["x-hubspot-signature"];
-
+  const payload = req.body;
+  console.log(payload);
   const nowIST = new Date().toLocaleString("en-IN", {
     timeZone: "Asia/Kolkata",
     hour12: true,
   });
 
-  console.log(`\n🟢 New webhook received on ${nowIST}`);
-  console.log("HubSpot Portal ID:", portalId);
-  console.log("Signature:", signature);
+  console.log(`\n🟢 Webhook received @ ${nowIST}`);
+  console.log(`🔐 Portal ID: ${portalId}`);
+  console.log(`🔐 Signature: ${signature}`);
 
-  const user = await User.findOne({
-    "hubspotIntegration.hubId": Number(portalId),
-  });
+  // 🔍 Log the raw payload
+  console.log("📦 Raw Payload:");
+  console.dir(payload, { depth: null });
 
+  // 🔐 Optional: Add signature verification (TODO)
+  // if (!verifyHubspotSignature(req, signature)) {
+  //   console.warn("❌ Invalid signature. Possible spoofed request.");
+  //   return res.status(403).send("Invalid signature");
+  // }
+
+  let hubId = Number(portalId);
+  if (isNaN(hubId)) {
+    console.error("❌ Invalid hubId:", portalId);
+    return res.status(400).send("Invalid HubSpot portal ID");
+  }
+
+  const user = await User.findOne({ "hubspotIntegration.hubId": hubId });
   if (!user) {
-    console.warn("⚠️ No CRM user found for portal ID:", portalId);
+    console.warn("⚠️ No CRM user found for portal ID:", hubId);
     return res.status(404).send("Unknown HubSpot portal");
   }
 
   console.log("👤 CRM User ID:", user.crmUserId);
 
-  if (Array.isArray(req.body)) {
-    req.body.forEach((event) => {
+  // Handle batched webhook events
+  if (Array.isArray(payload)) {
+    payload.forEach((event, index) => {
       const utcDate = new Date(Number(event.occurredAt));
       const istDate = utcDate.toLocaleString("en-IN", {
         timeZone: "Asia/Kolkata",
         hour12: true,
       });
 
-      console.log("📌 Event Type:", event.subscriptionType);
-      console.log("📌 Object ID:", event.objectId);
-      console.log("📌 Occurred At (UTC):", utcDate.toISOString());
-      console.log("📌 Occurred At (IST):", istDate);
+      console.log(`\n🔔 Event #${index + 1}`);
+      console.log(`📌 Type: ${event.subscriptionType}`);
+      console.log(`📌 Object ID: ${event.objectId}`);
+      console.log(`📆 UTC Time: ${utcDate.toISOString()}`);
+      console.log(`📆 IST Time: ${istDate}`);
     });
+  } else {
+    console.warn("⚠️ Unexpected webhook format (not array):", payload);
   }
 
   res.status(200).send("Webhook received");
 });
-
 app.post("/api/test/add-user", async (req, res) => {
   try {
     const user = await User.create({}); // no crmUserId needed
