@@ -1,12 +1,17 @@
-// models/hubspotIntegration.model.js
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
-const HubspotIntegrationSchema = new mongoose.Schema({
-  crmUserId: String, // your internal CRM user ID
-  hubId: Number,     // from HubSpot
+const hubspotIntegrationSchema = new mongoose.Schema({
+  crmUserId: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: true,
+    ref: "User",
+    unique: true,
+  },
   accessToken: String,
   refreshToken: String,
+  hubId: Number,
   expiresAt: Date,
+  connectedAt: Date,
 }, { timestamps: true });
 
-module.exports = mongoose.model('HubspotIntegration', HubspotIntegrationSchema);
+module.exports = mongoose.model("HubspotIntegration", hubspotIntegrationSchema);

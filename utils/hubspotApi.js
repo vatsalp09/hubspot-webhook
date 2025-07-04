@@ -1,4 +1,4 @@
-const axios = require('axios');
+const axios = require("axios");
 
 /**
  * Fetches all available contact properties (default + custom) from HubSpot.
@@ -8,25 +8,83 @@ const axios = require('axios');
  */
 async function fetchContactDetails(hubId, accessToken, contactId) {
   try {
-    const url = `https://api.hubapi.com/crm/v3/objects/contacts/${contactId}?archived=false`;
+    const desiredProperties = [
+      "email",
+      "firstname",
+      "lastname",
+      "phone",
+      "zip", // or "postalcode" depending on your portal
+      "address", // optional
+      "city", // optional
+      "state", // optional
+      "hs_object_id",
+    ];
 
-    const response = await axios.get(url, {
+    const url = `https://api.hubapi.com/crm/v3/objects/contacts/${contactId}`;
+    const query = new URLSearchParams({
+      archived: "false",
+      properties: desiredProperties.join(","),
+    });
+
+    const fullUrl = `${url}?${query.toString()}`;
+
+    const res = await axios.get(fullUrl, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
       },
     });
 
-    console.log("fetchContactDetails", response)
-    return response.data; // This contains the full contact object
+    const data = res.data;
+    const props = data.properties || {};
 
+    return {
+      objectId: Number(data.id),
+      email: props.email || null,
+      firstName: props.firstname || null,
+      lastName: props.lastname || null,
+      phoneNumber: props.phone || null,
+      postalCode: props.zip || props.postalcode || null,
+      createdAtHubspot: props.createdate
+        ? new Date(props.createdate)
+        : new Date(data.createdAt),
+      raw: data,
+    };
   } catch (err) {
     const msg = err.response
-      ? `HubSpot API error (${err.response.status}): ${JSON.stringify(err.response.data)}`
+      ? `HubSpot API error (${err.response.status}): ${JSON.stringify(
+          err.response.data
+        )}`
       : `HubSpot request error: ${err.message}`;
-    console.error(`❌ Failed to fetch contact ${contactId} from hub ${hubId}:`, msg);
+    console.error(
+      `❌ Failed to fetch contact ${contactId} from hub ${hubId}:`,
+      msg
+    );
     throw new Error(msg);
   }
 }
+/**
+ * Fetches details about the connected HubSpot portal.
+ * @param {string} accessToken
+ */
+async function getHubspotAccountDetails(accessToken) {
+  const url = `https://api.hubapi.com/integrations/v1/me`;
 
-module.exports = { fetchContactDetails };
+  const res = await axios.get(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  console.log(res.data);
+
+  return {
+    portalId: res.data.portalId,
+    userId: res.data.userId,
+    hubDomain: res.data.hubDomain,
+    scopes: res.data.scopes,
+    appId: res.data.appId,
+  };
+}
+
+module.exports = { fetchContactDetails, getHubspotAccountDetails };

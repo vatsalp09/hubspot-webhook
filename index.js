@@ -4,7 +4,13 @@ const dotenv = require("dotenv");
 const connectDB = require("./db");
 const User = require("./models/user.model");
 const { generateInstallUrl } = require("./utils/hubspotUtils");
-const { fetchContactDetails } = require("./utils/hubspotApi");
+const {
+  fetchContactDetails,
+  getHubspotAccountDetails,
+} = require("./utils/hubspotApi");
+const axios = require("axios");
+const Contact = require("./models/contact.model");
+const refreshAccessToken = require("./utils/refreshAccessToken");
 
 dotenv.config();
 
@@ -37,6 +43,7 @@ app.get("/api/hubspot/webhook", async (req, res) => {
   }
 
   try {
+    // Exchange code for tokens
     const params = new URLSearchParams();
     params.append("grant_type", "authorization_code");
     params.append("client_id", process.env.HUBSPOT_CLIENT_ID);
@@ -44,21 +51,32 @@ app.get("/api/hubspot/webhook", async (req, res) => {
     params.append("redirect_uri", process.env.HUBSPOT_REDIRECT_URI);
     params.append("code", code);
 
-    const response = await require("axios").post("https://api.hubapi.com/oauth/v1/token", params, {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    });
+    const response = await axios.post(
+      "https://api.hubapi.com/oauth/v1/token",
+      params,
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      }
+    );
 
-    const data = response.data;
-    const expiresAt = new Date(Date.now() + data.expires_in * 1000);
+    const { access_token, refresh_token, expires_in } = response.data;
 
+    const expiresAt = new Date(Date.now() + expires_in * 1000);
+
+    // 🔍 Get portal/account details
+    const accountDetails = await getHubspotAccountDetails(access_token); // Custom utility
+
+    console.log("🎯 HubSpot Account Details:", accountDetails);
+
+    // 🧠 Save integration info
     await User.findOneAndUpdate(
       { crmUserId },
       {
         crmUserId,
         hubspotIntegration: {
-          accessToken: data.access_token,
-          refreshToken: data.refresh_token,
-          hubId: data.hub_id,
+          accessToken: access_token,
+          refreshToken: refresh_token,
+          hubId: accountDetails.portalId,
           expiresAt,
           connectedAt: new Date(),
         },
@@ -76,9 +94,9 @@ app.get("/api/hubspot/webhook", async (req, res) => {
 
 // Webhook handler
 app.post("/api/hubspot/webhook", async (req, res) => {
-  const portalId = req.headers["x-hubspot-hub-id"];
   const signature = req.headers["x-hubspot-signature"];
   const payload = req.body;
+  const portalId = Array.isArray(payload) ? payload[0]?.portalId : undefined;
 
   const nowIST = new Date().toLocaleString("en-IN", {
     timeZone: "Asia/Kolkata",
@@ -93,16 +111,37 @@ app.post("/api/hubspot/webhook", async (req, res) => {
   const hubId = Number(portalId);
   if (isNaN(hubId)) {
     console.error("❌ Invalid hubId:", portalId);
-    return res.status(400).send("Invalid HubSpot portal ID");
+    return res.status(400).json({ message: "Invalid HubSpot portal ID" });
   }
 
   const user = await User.findOne({ "hubspotIntegration.hubId": hubId });
   if (!user) {
     console.warn("⚠️ No CRM user found for portal ID:", hubId);
-    return res.status(404).send("Unknown HubSpot portal");
+    return res.status(404).json({ message: "Unknown HubSpot portal ID" });
   }
 
-  const accessToken = user.hubspotIntegration.accessToken;
+  let accessToken = user.hubspotIntegration.accessToken;
+
+  if (new Date() >= new Date(user.hubspotIntegration.expiresAt)) {
+    try {
+      const refreshed = await refreshAccessToken(
+        user.hubspotIntegration.refreshToken
+      );
+      user.hubspotIntegration.accessToken = refreshed.accessToken;
+      user.hubspotIntegration.refreshToken = refreshed.refreshToken;
+      user.hubspotIntegration.expiresAt = refreshed.expiresAt;
+      await user.save();
+      accessToken = refreshed.accessToken;
+      console.log("🔁 Access token refreshed");
+    } catch (refreshErr) {
+      console.error("❌ Failed to refresh access token:", refreshErr.message);
+      return res
+        .status(401)
+        .json({ message: "Failed to refresh HubSpot token" });
+    }
+  }
+
+  const messages = [];
 
   if (Array.isArray(payload)) {
     for (const [index, event] of payload.entries()) {
@@ -117,21 +156,61 @@ app.post("/api/hubspot/webhook", async (req, res) => {
       console.log(`📌 Object ID: ${event.objectId}`);
       console.log(`📆 UTC: ${utcDate.toISOString()} | IST: ${istDate}`);
 
-      if (event.subscriptionType === "contact.creation") {
+      if (
+        event.subscriptionType === "contact.creation" ||
+        event.subscriptionType === "contact.propertyChange"
+      ) {
         try {
-          const contact = await fetchContactDetails(hubId, accessToken, event.objectId);
+          const contact = await fetchContactDetails(
+            hubId,
+            accessToken,
+            event.objectId
+          );
           console.log("📄 Contact Details:");
           console.dir(contact, { depth: null });
+
+          await Contact.findOneAndUpdate(
+            { objectId: contact.objectId, hubId },
+            {
+              ...contact,
+              hubId,
+              crmUserId: user._id,
+            },
+            { upsert: true, new: true }
+          );
+
+          const typeLabel =
+            event.subscriptionType === "contact.creation"
+              ? "created"
+              : "updated";
+          const msg = `✅ Contact ${
+            contact.email || contact.objectId
+          } ${typeLabel} successfully`;
+          console.log(msg);
+          messages.push(msg);
         } catch (err) {
-          console.error(`❌ Failed to fetch contact ${event.objectId}:`, err.message);
+          const msg = `❌ Failed to fetch/save contact ${event.objectId}: ${err.message}`;
+          console.error(msg);
+          messages.push(msg);
         }
+      } else {
+        const msg = `⚠️ Unsupported subscription type: ${event.subscriptionType}`;
+        console.warn(msg);
+        messages.push(msg);
       }
     }
   } else {
-    console.warn("⚠️ Unexpected webhook format:", payload);
+    const msg = "⚠️ Unexpected webhook format (non-array)";
+    console.warn(msg);
+    messages.push(msg);
   }
 
-  res.status(200).send("Webhook received");
+  return res.status(200).json({
+    receivedAt: nowIST,
+    hubId,
+    eventCount: messages.length,
+    messages,
+  });
 });
 
 // Test user creation
